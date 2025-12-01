@@ -1,97 +1,383 @@
+# -*- encoding: utf-8 -*-
+# @Time    :   2020/08/04
+# @Author  :   Kaiyuan Li
+# @email   :   tsotfsk@outlook.com
+
+# UPDATE
+# @Time    :   2020/08/12, 2020/12/21, 2020/9/16
+# @Author  :   Kaiyuan Li, Zhichao Feng, Xingyu Pan
+# @email   :   tsotfsk@outlook.com, fzcbupt@gmail.com, panxy@ruc.edu.cn
+
+"""
+recbole.evaluator.metrics
+############################
+"""
+
+from logging import getLogger
+
 import numpy as np
-from sklearn.metrics import roc_auc_score
-
-def recall(rank, ground_truth, N):
-    return len(set(rank[:N]) & set(ground_truth)) / float(len(set(ground_truth)))
+from sklearn.metrics import auc as sk_auc
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 
-def precision_at_k(r, k):
-    """Score is precision @ k
-    Relevance is binary (nonzero is relevant).
-    Returns:
-        Precision @ k
-    Raises:
-        ValueError: len(r) must be >= k
+#    TopK Metrics    #
+
+
+def hit_(pos_index, pos_len):
+    r"""Hit_ (also known as hit ratio at :math:`N`) is a way of calculating how many 'hits' you have
+    in an n-sized list of ranked items.
+
+    .. _Hit: c
+
+    .. math::
+        \mathrm {HR@K} =\frac{Number \space of \space Hits @K}{|GT|}
+
+    :math:`HR` is the number of users with a positive sample in the recommendation list.
+    :math:`GT` is the total number of samples in the test set.
+
     """
-    assert k >= 1
-    r = np.asarray(r)[:k]
-    return np.mean(r)
+    result = np.cumsum(pos_index, axis=1)
+    return (result > 0).astype(int)
 
 
-def average_precision(r,cut):
-    """Score is average precision (area under PR curve)
-    Relevance is binary (nonzero is relevant).
-    Returns:
-        Average precision
+def mrr_(pos_index, pos_len):
+    r"""The MRR_ (also known as mean reciprocal rank) is a statistic measure for evaluating any process
+    that produces a list of possible responses to a sample of queries, ordered by probability of correctness.
+
+    .. _MRR: https://en.wikipedia.org/wiki/Mean_reciprocal_rank
+
+    .. math::
+        \mathrm {MRR} = \frac{1}{|{U}|} \sum_{i=1}^{|{U}|} \frac{1}{rank_i}
+
+    :math:`U` is the number of users, :math:`rank_i` is the rank of the first item in the recommendation list
+    in the test set results for user :math:`i`.
+
     """
-    r = np.asarray(r)
-    out = [precision_at_k(r, k + 1) for k in range(cut) if r[k]]
-    if not out:
-        return 0.
-    return np.sum(out)/float(min(cut, np.sum(r)))
-
-
-def mean_average_precision(rs):
-    """Score is mean average precision
-    Relevance is binary (nonzero is relevant).
-    Returns:
-        Mean average precision
-    """
-    return np.mean([average_precision(r) for r in rs])
-
-
-def dcg_at_k(r, k, method=1):
-    """Score is discounted cumulative gain (dcg)
-    Relevance is positive real values.  Can use binary
-    as the previous methods.
-    Returns:
-        Discounted cumulative gain
-    """
-    r = np.asfarray(r)[:k]
-    if r.size:
-        if method == 0:
-            return r[0] + np.sum(r[1:] / np.log2(np.arange(2, r.size + 1)))
-        elif method == 1:
-            return np.sum(r / np.log2(np.arange(2, r.size + 2)))
+    idxs = pos_index.argmax(axis=1)
+    result = np.zeros_like(pos_index, dtype=np.float)
+    for row, idx in enumerate(idxs):
+        if pos_index[row, idx] > 0:
+            result[row, idx:] = 1 / (idx + 1)
         else:
-            raise ValueError('method must be 0 or 1.')
-    return 0.
+            result[row, idx:] = 0
+    return result
 
 
-def ndcg_at_k(r, k, method=1):
-    """Score is normalized discounted cumulative gain (ndcg)
-    Relevance is positive real values.  Can use binary
-    as the previous methods.
-    Returns:
-        Normalized discounted cumulative gain
+def map_(pos_index, pos_len):
+    r"""MAP_ (also known as Mean Average Precision) The MAP is meant to calculate Avg. Precision for the relevant items.
+
+    Note:
+        In this case the normalization factor used is :math:`\frac{1}{\min (m,N)}`, which prevents your AP score from
+        being unfairly suppressed when your number of recommendations couldn't possibly capture all the correct ones.
+
+    .. _map: http://sdsawtelle.github.io/blog/output/mean-average-precision-MAP-for-recommender-systems.html#MAP-for-Recommender-Algorithms
+
+    .. math::
+        \begin{align*}
+        \mathrm{AP@N} &= \frac{1}{\mathrm{min}(m,N)}\sum_{k=1}^N P(k) \cdot rel(k) \\
+        \mathrm{MAP@N}& = \frac{1}{|U|}\sum_{u=1}^{|U|}(\mathrm{AP@N})_u
+        \end{align*}
+
     """
-    dcg_max = dcg_at_k(sorted(r, reverse=True), k, method)
-    if not dcg_max:
-        return 0.
-    return dcg_at_k(r, k, method) / dcg_max
+    pre = precision_(pos_index, pos_len)
+    sum_pre = np.cumsum(pre * pos_index.astype(np.float), axis=1)
+    len_rank = np.full_like(pos_len, pos_index.shape[1])
+    actual_len = np.where(pos_len > len_rank, len_rank, pos_len)
+    result = np.zeros_like(pos_index, dtype=np.float)
+    for row, lens in enumerate(actual_len):
+        ranges = np.arange(1, pos_index.shape[1] + 1)
+        ranges[lens:] = ranges[lens - 1]
+        result[row] = sum_pre[row] / ranges
+    return result
 
 
-def recall_at_k(r, k, all_pos_num):
-    r = np.asfarray(r)[:k]
-    return np.sum(r) / all_pos_num
+def recall_(pos_index, pos_len):
+    r"""Recall@K：累计命中 / 真实相关数
+    参数：
+      pos_index : ndarray, [num_users, K]，布尔或0/1，表示在推荐列表位置是否命中
+      pos_len   : ndarray, [num_users]，每个用户真实相关物品数（test正样本数）
+    返回：
+      ndarray, [num_users, K]，每列是 @k 的 Recall
+    说明：
+      为了避免 pos_len=0 产生 NaN/inf，这里对分母做了安全处理：
+      - 分母 = max(pos_len, 1)
+      - 对 pos_len==0 的用户，分子也一定为 0，因此该用户整行 Recall 为 0
+      更严格的做法是在上游评测前过滤 pos_len==0 的用户。
+    """
+    denom = np.maximum(pos_len.reshape(-1, 1), 1)  # 防除零
+    return np.cumsum(pos_index, axis=1) / denom
 
 
-def hit_at_k(r, k):
-    r = np.array(r)[:k]
-    if np.sum(r) > 0:
-        return 1.
+def ndcg_(pos_index, pos_len):
+    r"""NDCG@K：排序质量，二值相关性
+    参数：
+      pos_index : ndarray, [num_users, K]，布尔或0/1
+      pos_len   : ndarray, [num_users]，真实相关个数
+    返回：
+      ndarray, [num_users, K]，每列是 @k 的 NDCG
+    关键点：
+      - IDCG 按 min(K, pos_len_u) 截断
+      - 对于 pos_len_u==0 的用户：IDCG 设为 1.0，DCG=0，整行 NDCG=0，避免 NaN。
+    """
+    num_users, K = pos_index.shape
+
+    # 位置折扣向量： [1/log2(2), 1/log2(3), ..., 1/log2(K+1)]
+    ranks = np.arange(1, K + 1, dtype=float)
+    discounts = 1.0 / np.log2(ranks + 1.0)  # shape [K]
+
+    # DCG：只在命中的位置累加对应折扣
+    dcg = np.cumsum(np.where(pos_index, discounts, 0.0), axis=1)  # [U, K]
+
+    # IDCG：对每个用户，用其 "可命中上限" L_u = min(K, pos_len_u) 的累计折扣，
+    # 超过 L_u 的位置，保持为 IDCG@L_u（即不再增长）
+    idcg = np.tile(np.cumsum(discounts), (num_users, 1))  # 先复制一份满长
+    idcg_len = np.minimum(pos_len, K)  # [U]
+
+    for u, L in enumerate(idcg_len):
+        if L <= 0:
+            # 无正样本：设定 idcg=1，dcg=0 → NDCG=0
+            idcg[u, :] = 1.0
+        else:
+            # 从第 L 位之后保持常数（=IDCG@L）
+            idcg[u, L:] = idcg[u, L - 1]
+
+    return dcg / idcg
+
+
+def precision_(pos_index, pos_len):
+    r"""Precision_ (also called positive predictive value) is the fraction of
+    relevant instances among the retrieved instances
+
+    .. _precision: https://en.wikipedia.org/wiki/Precision_and_recall#Precision
+
+    .. math::
+        \mathrm {Precision@K} = \frac{|Rel_u \cap Rec_u|}{Rec_u}
+
+    :math:`Rel_u` is the set of items relevant to user :math:`U`,
+    :math:`Rec_u` is the top K items recommended to users.
+    We obtain the result by calculating the average :math:`Precision@K` of each user.
+
+    """
+    return pos_index.cumsum(axis=1) / np.arange(1, pos_index.shape[1] + 1)
+
+
+def gauc_(user_len_list, pos_len_list, pos_rank_sum):
+    r"""GAUC_ (also known as Group Area Under Curve) is used to evaluate the two-class model, referring to
+    the area under the ROC curve grouped by user.
+
+    .. _GAUC: https://dl.acm.org/doi/10.1145/3219819.3219823
+
+    Note:
+        It calculates the AUC score of each user, and finally obtains GAUC by weighting the user AUC.
+        It is also not limited to k. Due to our padding for `scores_tensor` in `RankEvaluator` with
+        `-np.inf`, the padding value will influence the ranks of origin items. Therefore, we use
+        descending sort here and make an identity transformation  to the formula of `AUC`, which is
+        shown in `auc_` function. For readability, we didn't do simplification in the code.
+
+    .. math::
+        \mathrm {GAUC} = \frac {{{M} \times {(M+N+1)} - \frac{M \times (M+1)}{2}} -
+        \sum\limits_{i=1}^M rank_{i}} {{M} \times {N}}
+
+    :math:`M` is the number of positive samples.
+    :math:`N` is the number of negative samples.
+    :math:`rank_i` is the descending rank of the ith positive sample.
+
+    """
+    neg_len_list = user_len_list - pos_len_list
+
+    # check positive and negative samples
+    any_without_pos = np.any(pos_len_list == 0)
+    any_without_neg = np.any(neg_len_list == 0)
+    non_zero_idx = np.full(len(user_len_list), True, dtype=np.bool)
+    if any_without_pos:
+        logger = getLogger()
+        logger.warning(
+            "No positive samples in some users, "
+            "true positive value should be meaningless, "
+            "these users have been removed from GAUC calculation"
+        )
+        non_zero_idx *= (pos_len_list != 0)
+    if any_without_neg:
+        logger = getLogger()
+        logger.warning(
+            "No negative samples in some users, "
+            "false positive value should be meaningless, "
+            "these users have been removed from GAUC calculation"
+        )
+        non_zero_idx *= (neg_len_list != 0)
+    if any_without_pos or any_without_neg:
+        item_list = user_len_list, neg_len_list, pos_len_list, pos_rank_sum
+        user_len_list, neg_len_list, pos_len_list, pos_rank_sum = \
+            map(lambda x: x[non_zero_idx], item_list)
+
+    pair_num = (user_len_list + 1) * pos_len_list - pos_len_list * (pos_len_list + 1) / 2 - np.squeeze(pos_rank_sum)
+    user_auc = pair_num / (neg_len_list * pos_len_list)
+    result = (user_auc * pos_len_list).sum() / pos_len_list.sum()
+
+    return result
+
+
+#    CTR Metrics    #
+def auc_(trues, preds):
+    r"""AUC_ (also known as Area Under Curve) is used to evaluate the two-class model, referring to
+    the area under the ROC curve
+
+    .. _AUC: https://en.wikipedia.org/wiki/Receiver_operating_characteristic#Area_under_the_curve
+
+    Note:
+        This metric does not calculate group-based AUC which considers the AUC scores
+        averaged across users. It is also not limited to k. Instead, it calculates the
+        scores on the entire prediction results regardless the users.
+
+    .. math::
+        \mathrm {AUC} = \frac{\sum\limits_{i=1}^M rank_{i}
+        - \frac {{M} \times {(M+1)}}{2}} {{{M} \times {N}}}
+
+    :math:`M` is the number of positive samples.
+    :math:`N` is the number of negative samples.
+    :math:`rank_i` is the ascending rank of the ith positive sample.
+
+    """
+    fps, tps = _binary_clf_curve(trues, preds)
+
+    if len(fps) > 2:
+        optimal_idxs = np.where(np.r_[True, np.logical_or(np.diff(fps, 2), np.diff(tps, 2)), True])[0]
+        fps = fps[optimal_idxs]
+        tps = tps[optimal_idxs]
+
+    tps = np.r_[0, tps]
+    fps = np.r_[0, fps]
+
+    if fps[-1] <= 0:
+        logger = getLogger()
+        logger.warning("No negative samples in y_true, " "false positive value should be meaningless")
+        fpr = np.repeat(np.nan, fps.shape)
     else:
-        return 0.
+        fpr = fps / fps[-1]
 
-def F1(pre, rec):
-    if pre + rec > 0:
-        return (2.0 * pre * rec) / (pre + rec)
+    if tps[-1] <= 0:
+        logger = getLogger()
+        logger.warning("No positive samples in y_true, " "true positive value should be meaningless")
+        tpr = np.repeat(np.nan, tps.shape)
     else:
-        return 0.
+        tpr = tps / tps[-1]
 
-def auc(ground_truth, prediction):
-    try:
-        res = roc_auc_score(y_true=ground_truth, y_score=prediction)
-    except Exception:
-        res = 0.
-    return res
+    return sk_auc(fpr, tpr)
+
+
+# Loss based Metrics #
+
+
+def mae_(trues, preds):
+    r"""`Mean absolute error regression loss`__
+
+    .. __: https://en.wikipedia.org/wiki/Mean_absolute_error
+
+    .. math::
+        \mathrm{MAE}=\frac{1}{|{T}|} \sum_{(u, i) \in {T}}\left|\hat{r}_{u i}-r_{u i}\right|
+
+    :math:`T` is the test set, :math:`\hat{r}_{u i}` is the score predicted by the model,
+    and :math:`r_{u i}` the actual score of the test set.
+
+    """
+    return mean_absolute_error(trues, preds)
+
+
+def rmse_(trues, preds):
+    r"""`Mean std error regression loss`__
+
+    .. __: https://en.wikipedia.org/wiki/Root-mean-square_deviation
+
+    .. math::
+        \mathrm{RMSE} = \sqrt{\frac{1}{|{T}|} \sum_{(u, i) \in {T}}(\hat{r}_{u i}-r_{u i})^{2}}
+
+    :math:`T` is the test set, :math:`\hat{r}_{u i}` is the score predicted by the model,
+    and :math:`r_{u i}` the actual score of the test set.
+
+    """
+    return np.sqrt(mean_squared_error(trues, preds))
+
+
+def log_loss_(trues, preds):
+    r"""`Log loss`__, aka logistic loss or cross-entropy loss
+
+    .. __: http://wiki.fast.ai/index.php/Log_Loss
+
+    .. math::
+        -\log {P(y_t|y_p)} = -(({y_t}\ \log{y_p}) + {(1-y_t)}\ \log{(1 - y_p)})
+
+    For a single sample, :math:`y_t` is true label in :math:`\{0,1\}`.
+    :math:`y_p` is the estimated probability that :math:`y_t = 1`.
+
+    """
+    eps = 1e-15
+    preds = np.float64(preds)
+    preds = np.clip(preds, eps, 1 - eps)
+    loss = np.sum(-trues * np.log(preds) - (1 - trues) * np.log(1 - preds))
+
+    return loss / len(preds)
+
+
+def _binary_clf_curve(trues, preds):
+    """Calculate true and false positives per binary classification threshold
+
+    Args:
+        trues (numpy.ndarray): the true scores' list
+        preds (numpy.ndarray): the predict scores' list
+
+    Returns:
+        fps (numpy.ndarray): A count of false positives, at index i being the number of negative
+        samples assigned a score >= thresholds[i]
+        preds (numpy.ndarray): An increasing count of true positives, at index i being the number
+        of positive samples assigned a score >= thresholds[i].
+
+    Note:
+        To improve efficiency, we referred to the origin code(which is available at sklearn.metrics.roc_curve)
+        in SkLearn and made some optimizations.
+
+    """
+    trues = (trues == 1)
+
+    desc_idxs = np.argsort(preds)[::-1]
+    preds = preds[desc_idxs]
+    trues = trues[desc_idxs]
+
+    unique_val_idxs = np.where(np.diff(preds))[0]
+    threshold_idxs = np.r_[unique_val_idxs, trues.size - 1]
+
+    tps = np.cumsum(trues)[threshold_idxs]
+    fps = 1 + threshold_idxs - tps
+    return fps, tps
+
+# Item based Metrics #
+
+# TODO
+# def coverage_():
+#     raise NotImplementedError
+
+# def gini_index_():
+#     raise NotImplementedError
+
+# def shannon_entropy_():
+#     raise NotImplementedError
+
+# def diversity_():
+#     raise NotImplementedError
+
+"""Function name and function mapper.
+Useful when we have to serialize evaluation metric names
+and call the functions based on deserialized names
+"""
+metrics_dict = {
+    'ndcg': ndcg_,
+    'hit': hit_,
+    'precision': precision_,
+    'map': map_,
+    'recall': recall_,
+    'mrr': mrr_,
+    'rmse': rmse_,
+    'mae': mae_,
+    'logloss': log_loss_,
+    'auc': auc_,
+    'gauc': gauc_
+}

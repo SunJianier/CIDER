@@ -20,14 +20,14 @@ class DataHandler(object):
     def __init__(self, dataset, batch_size):
         self.dataset_name = dataset
         self.batch_size = batch_size
-        if self.dataset_name.find("Taobao") != -1 or self.dataset_name.find("Beibei") != -1:
+        if self.dataset_name.find("Taobao") != -1:
             behs = ["pv", "cart", "train"]
 
         elif self.dataset_name.find("Tmall") != -1:
             behs = ["pv", "fav", "cart", "train"]
 
-        elif self.dataset_name.find("IJCAI") != -1:
-            behs = ["click", "fav", "cart", "train"]
+        elif self.dataset_name.find("Jdata") != -1:
+            behs = ["view", "collect", "cart", "train"]
 
         else:
             raise ValueError("Invalid dataset name.")
@@ -125,18 +125,7 @@ class DataHandler(object):
                 edge = torch.tensor([row, col], dtype=torch.long)
                 self.edge_index.append(edge)
                 self.edge_type.append(torch.tensor([i for _ in range(len(row))]))
-        # with open(train_file) as f:
-        #     for l in f.readlines():
-        #         if len(l) == 0:
-        #             break
-        #         l = l.strip("\n")
-        #         items = [int(i) for i in l.split(" ")]
-        #         uid, train_items = items[0], items[1:]
-        #         self.interNum[-1] += len(train_items)
-        #         for i in train_items:
-        #             self.trnMats[-1][uid, i] = 1.0
 
-        #         self.trnDicts[-1][uid] = train_items
         with open(test_file) as f:
             for l in f.readlines():
                 if len(l) == 0:
@@ -160,125 +149,8 @@ class DataHandler(object):
         self.print_statistics()
         self.train_items = self.trnDicts[-1]
         self.test_set = self.tstDicts
+        self.test_gt_length = np.array([len(x) for _,x in self.test_set.items()])
         self.path = self.predir
-
-    def get_adj_mat(self):
-        self.saveAdjMatPath = "Adj_Mats/" + self.dataset_name
-        os.makedirs(self.saveAdjMatPath, exist_ok=True)
-
-        adj_mat_list = []
-        norm_adj_mat_list = []
-        mean_adj_mat_list = []
-        pre_adj_mat_list = []
-        try:
-            t1 = time()
-            i = -1
-            beh = self.behs[i]
-            adj_mat = sp.load_npz(self.saveAdjMatPath + "/s_adj_mat_" + beh + ".npz")
-            norm_adj_mat = sp.load_npz(self.saveAdjMatPath + "/s_norm_adj_mat_" + beh + ".npz")
-            mean_adj_mat = sp.load_npz(self.saveAdjMatPath + "/s_mean_adj_mat_" + beh + ".npz")
-            adj_mat_list.append(adj_mat)
-            norm_adj_mat_list.append(norm_adj_mat)
-            mean_adj_mat_list.append(mean_adj_mat)
-            print("already load adj matrix", time() - t1)
-
-        except Exception:
-            i = -1
-            beh = self.behs[i]
-            adj_mat, norm_adj_mat, mean_adj_mat = self.create_adj_mat(self.trnMats[i])
-            adj_mat_list.append(adj_mat)
-            norm_adj_mat_list.append(norm_adj_mat)
-            mean_adj_mat_list.append(mean_adj_mat)
-            sp.save_npz(self.saveAdjMatPath + "/s_adj_mat_" + beh + ".npz", adj_mat)
-            sp.save_npz(self.saveAdjMatPath + "/s_norm_adj_mat_" + beh + ".npz", norm_adj_mat)
-            sp.save_npz(self.saveAdjMatPath + "/s_mean_adj_mat_" + beh + ".npz", mean_adj_mat)
-
-        try:
-            i = -1
-            beh = self.behs[i]
-            pre_adj_mat = sp.load_npz(self.saveAdjMatPath + "/s_pre_adj_mat_" + beh + ".npz")
-            pre_adj = pre_adj_mat
-            print("already load pre adj matrix")
-        except Exception:
-            i = -1
-            beh = self.behs[i]
-            adj_mat = adj_mat_list[i]
-            rowsum = np.array(adj_mat.sum(1))
-            d_inv = np.power(rowsum, -0.5).flatten()
-            d_inv[np.isinf(d_inv)] = 0.0
-            d_mat_inv = sp.diags(d_inv)
-
-            norm_adj = d_mat_inv.dot(adj_mat)
-            norm_adj = norm_adj.dot(d_mat_inv)
-            print("generate pre adjacency matrix.")
-            pre_adj_mat = norm_adj.tocsr()
-            pre_adj = pre_adj_mat
-            sp.save_npz(self.saveAdjMatPath + "/s_pre_adj_mat_" + beh + ".npz", norm_adj)
-
-        return pre_adj
-
-    def create_adj_mat(self, which_R):
-        t1 = time()
-        adj_mat = sp.dok_matrix(
-            (self.n_users + self.n_items, self.n_users + self.n_items), dtype=np.float32
-        )  # 全图邻接矩阵
-        adj_mat = adj_mat.tolil()
-        R = which_R.tolil()
-        adj_mat[: self.n_users, self.n_users :] = R
-        adj_mat[self.n_users :, : self.n_users] = R.T
-        adj_mat = adj_mat.todok()
-        print("already create adjacency matrix", adj_mat.shape, time() - t1)
-
-        t2 = time()
-
-        def normalized_adj_single(adj):
-            rowsum = np.array(adj.sum(1))
-
-            d_inv = np.power(rowsum, -1).flatten()
-            d_inv[np.isinf(d_inv)] = 0.0
-            d_mat_inv = sp.diags(d_inv)
-
-            norm_adj = d_mat_inv.dot(adj)
-            print("generate single-normalized adjacency matrix.")
-            return norm_adj.tocoo()
-
-        def check_adj_if_equal(adj):
-            dense_A = np.array(adj.todense())
-            degree = np.sum(dense_A, axis=1, keepdims=False)
-
-            temp = np.dot(np.diag(np.power(degree, -1)), dense_A)
-            print("check normalized adjacency matrix whether equal to this laplacian matrix.")
-            return temp
-
-        norm_adj_mat = normalized_adj_single(adj_mat + sp.eye(adj_mat.shape[0]))
-        mean_adj_mat = normalized_adj_single(adj_mat)
-
-        print("already normalize adjacency matrix", time() - t2)
-        return adj_mat.tocsr(), norm_adj_mat.tocsr(), mean_adj_mat.tocsr()
-
-    def get_unified_sim(self, sim_measure):
-        user_unified_sim_file_name = "_".join(["user_unified_sim_mat", sim_measure, ".npz"])
-        item_unified_sim_file_name = "_".join(["item_unified_sim_mat", sim_measure, ".npz"])
-        try:
-            t1 = time()
-            user_unified_sim_mat = sp.load_npz(
-                os.path.join(self.saveSimMatPath, user_unified_sim_file_name)
-            )
-            item_unified_sim_mat = sp.load_npz(
-                os.path.join(self.saveSimMatPath, item_unified_sim_file_name)
-            )
-            print("already load unified sim".format(time() - t1))
-        except Exception:
-            print("No Unified Sim File!")
-        return user_unified_sim_mat, item_unified_sim_mat
-
-    def negative_pool(self):
-        t1 = time()
-        for u in self.train_items.keys():
-            neg_items = list(set(range(self.n_items)) - set(self.train_items[u]))
-            pools = [rd.choice(neg_items) for _ in range(100)]
-            self.neg_pools[u] = pools
-        print("refresh negative pools", time() - t1)
 
     def sample_behvaior_item(self, u, beh, num):
         pos_items = []
@@ -289,7 +161,7 @@ class DataHandler(object):
                 items = rd.choice(self.trnDicts[beh][u])
                 pos_items.append(items)
             while len(neg_items) < num:
-                neg = rd.randint(0, self.n_items)
+                neg = rd.randint(0, self.n_items-1)
                 if neg not in self.allInter[u] and neg not in neg_items:
                     neg_items.append(neg)
         else:
