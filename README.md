@@ -3,12 +3,15 @@ The official code for CIDER (Cross-behavior Item Dependency Modeling for Multi-b
 > TOIS 2026
 
 ## 🔬 Environment Setup
+
+The code is implemented in Python 3.9.0. The required packages are listed as follows:
+
 * ``torch==2.4.1``
 * ``scikit_learn==1.5.1``
 * ``scipy==1.11.1``
 * ``numpy==1.23.4``
 
-Run ``pip install -r requirements.txt``
+The required packages can be installed via: ``pip install -r requirements.txt``
 
 ## 🚀 Getting Started
 
